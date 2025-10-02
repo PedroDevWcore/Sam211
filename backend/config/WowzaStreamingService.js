@@ -124,80 +124,50 @@ class WowzaStreamingService {
     }
   }
 
-  // Verificar se aplicação do usuário existe
-  async checkApplicationExists(userLogin) {
+  // Verificar se aplicação do usuário existe via JMX
+  async checkApplicationExists(userLogin, serverId) {
     try {
-      const response = await fetch(`${this.baseUrl}/v2/servers/_defaultServer_/applications/${userLogin}`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Basic ${Buffer.from(`${this.username}:${this.password}`).toString('base64')}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 10000
-      });
+      const SSHManager = require('./SSHManager');
+      const jmxCommand = '/usr/bin/java -cp /usr/local/WowzaMediaServer JMXCommandLine -jmx service:jmx:rmi://localhost:8084/jndi/rmi://localhost:8085/jmxrmi -user admin -pass admin';
 
-      return response.ok;
+      const command = `${jmxCommand} getApplicationInstanceInfo ${userLogin}`;
+      const result = await SSHManager.executeCommand(serverId, command);
+
+      // Se a aplicação existe, o comando não retorna erro
+      const exists = result.stdout && !result.stdout.includes('ERROR') && !result.stdout.includes('not found');
+      console.log(`🔍 Verificando aplicação ${userLogin}: ${exists ? 'existe' : 'não existe'}`);
+      return exists;
     } catch (error) {
       console.warn(`Aplicação ${userLogin} não existe, será criada`);
       return false;
     }
   }
 
-  // Criar aplicação do usuário no Wowza
-  async createUserApplication(userLogin, userConfig) {
+  // Criar aplicação do usuário no Wowza via JMX
+  async createUserApplication(userLogin, userConfig, serverId) {
     try {
-      const applicationConfig = {
-        restURI: `http://localhost:8087/v2/servers/_defaultServer_/applications/${userLogin}`,
-        name: userLogin,
-        appType: "Live",
-        description: `Live streaming application for user ${userLogin}`,
-        streamConfig: {
-          streamType: "live",
-          storageDir: `/home/streaming/${userLogin}`,
-          liveStreamPacketizers: "cupertinostreamingpacketizer,mpegdashstreamingpacketizer,sanjosestreamingpacketizer,smoothstreamingpacketizer"
-        },
-        modules: [
-          {
-            name: "base",
-            description: "Base",
-            class: "com.wowza.wms.module.ModuleCore"
-          },
-          {
-            name: "streamPublisher",
-            description: "Stream Publisher",
-            class: "com.wowza.wms.plugin.streampublisher.ModuleStreamPublisher"
-          }
-        ],
-        properties: [
-          {
-            name: "streamPublisherSmilFile",
-            value: "playlists_agendamentos.smil",
-            type: "String"
-          },
-          {
-            name: "limitPublishedStreamBandwidthMaxBitrate",
-            value: userConfig.bitrate || 2500,
-            type: "Integer"
-          }
-        ]
-      };
+      const SSHManager = require('./SSHManager');
+      const jmxCommand = '/usr/bin/java -cp /usr/local/WowzaMediaServer JMXCommandLine -jmx service:jmx:rmi://localhost:8084/jndi/rmi://localhost:8085/jmxrmi -user admin -pass admin';
 
-      const response = await fetch(`${this.baseUrl}/v2/servers/_defaultServer_/applications`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Basic ${Buffer.from(`${this.username}:${this.password}`).toString('base64')}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(applicationConfig),
-        timeout: 15000
-      });
+      console.log(`📁 Criando aplicação ${userLogin} via JMX...`);
 
-      if (response.ok) {
-        console.log(`✅ Aplicação ${userLogin} criada no Wowza`);
+      // Criar estrutura de diretórios primeiro
+      const createDirCommand = `mkdir -p /usr/local/WowzaStreamingEngine/conf/${userLogin} && echo "OK"`;
+      await SSHManager.executeCommand(serverId, createDirCommand);
+
+      // Copiar template de aplicação
+      const copyTemplateCommand = `cp -r /usr/local/WowzaStreamingEngine/conf/_defaultServer_/_defaultVHost_/live/Application.xml /usr/local/WowzaStreamingEngine/conf/${userLogin}/Application.xml && echo "OK"`;
+      await SSHManager.executeCommand(serverId, copyTemplateCommand);
+
+      // Iniciar aplicação via JMX
+      const startCommand = `${jmxCommand} startAppInstance ${userLogin}`;
+      const result = await SSHManager.executeCommand(serverId, startCommand);
+
+      if (result.stdout && !result.stdout.includes('ERROR')) {
+        console.log(`✅ Aplicação ${userLogin} criada e iniciada via JMX`);
         return true;
       } else {
-        const errorText = await response.text();
-        console.error(`Erro ao criar aplicação ${userLogin}:`, errorText);
+        console.error(`❌ Erro ao criar aplicação ${userLogin}:`, result.stdout || result.stderr);
         return false;
       }
     } catch (error) {
@@ -206,42 +176,28 @@ class WowzaStreamingService {
     }
   }
 
-  // Iniciar Stream Publisher (equivalente ao exemplo PHP)
-  async startStreamPublisher(userLogin, smilFile) {
+  // Iniciar Stream Publisher via JMX e SSH
+  async startStreamPublisher(userLogin, smilFile, serverId) {
     try {
       console.log(`🎬 Iniciando Stream Publisher para ${userLogin} com arquivo ${smilFile}`);
 
-      // Configuração do stream publisher
-      const streamConfig = {
-        restURI: `http://localhost:8087/v2/servers/_defaultServer_/applications/${userLogin}/streamfiles/${smilFile}/actions/connect`,
-        connectAppName: userLogin,
-        appInstance: "_definst_",
-        mediaCasterType: "rtp",
-        streamName: userLogin,
-        sessionName: `${userLogin}_session_${Date.now()}`
-      };
+      const SSHManager = require('./SSHManager');
+      const jmxCommand = '/usr/bin/java -cp /usr/local/WowzaMediaServer JMXCommandLine -jmx service:jmx:rmi://localhost:8084/jndi/rmi://localhost:8085/jmxrmi -user admin -pass admin';
 
-      const response = await fetch(`${this.baseUrl}/v2/servers/_defaultServer_/applications/${userLogin}/streamfiles/${smilFile}/actions/connect`, {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Basic ${Buffer.from(`${this.username}:${this.password}`).toString('base64')}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(streamConfig),
-        timeout: 15000
-      });
+      // Conectar stream file via JMX
+      const connectCommand = `${jmxCommand} connectStreamFile ${userLogin} ${smilFile}`;
+      const result = await SSHManager.executeCommand(serverId, connectCommand);
 
-      if (response.ok) {
+      if (result.stdout && !result.stdout.includes('ERROR')) {
         console.log(`✅ Stream Publisher iniciado para ${userLogin}`);
-        
+
         // Aguardar um pouco para o stream se estabilizar
         await new Promise(resolve => setTimeout(resolve, 3000));
-        
+
         return { success: true };
       } else {
-        const errorText = await response.text();
-        console.error(`Erro ao iniciar Stream Publisher:`, errorText);
-        return { success: false, error: errorText };
+        console.error(`Erro ao iniciar Stream Publisher:`, result.stdout || result.stderr);
+        return { success: false, error: result.stdout || result.stderr };
       }
     } catch (error) {
       console.error('Erro ao iniciar Stream Publisher:', error);
@@ -780,7 +736,7 @@ class WowzaStreamingService {
       }
 
       // Verificar se aplicação do usuário existe
-      const appExists = await this.checkApplicationExists(userLogin);
+      const appExists = await this.checkApplicationExists(userLogin, serverId);
 
       if (!appExists) {
         console.log(`📁 Aplicação ${userLogin} não existe, criando...`);
@@ -808,11 +764,12 @@ class WowzaStreamingService {
           }
         }
 
-        // Criar aplicação do usuário
-        const createResult = await this.createUserApplication(userLogin, userConfig);
+        // Criar aplicação do usuário via JMX
+        const createResult = await this.createUserApplication(userLogin, userConfig, serverId);
 
         if (!createResult) {
           console.error(`❌ Falha ao criar aplicação ${userLogin}`);
+          console.log(`⚠️ Aviso ao iniciar streaming Wowza: Não foi possível criar aplicação no Wowza. Verifique as configurações do servidor.`);
           return {
             success: false,
             error: 'Não foi possível criar aplicação no Wowza. Verifique as configurações do servidor.'
@@ -825,8 +782,8 @@ class WowzaStreamingService {
         await new Promise(resolve => setTimeout(resolve, 2000));
       }
 
-      // Iniciar Stream Publisher via Wowza API
-      const streamResult = await this.startStreamPublisher(userLogin, smilFileName);
+      // Iniciar Stream Publisher via JMX
+      const streamResult = await this.startStreamPublisher(userLogin, smilFileName, serverId);
 
       if (streamResult.success) {
         console.log(`✅ Streaming SMIL iniciado com sucesso para ${userLogin}`);
@@ -855,7 +812,7 @@ class WowzaStreamingService {
     }
   }
 
-  // Parar streaming SMIL
+  // Parar streaming SMIL via JMX
   async stopSMILStreaming(userId, userLogin, smilFileName) {
     try {
       console.log(`🛑 Parando streaming SMIL para ${userLogin}: ${smilFileName}`);
@@ -865,31 +822,31 @@ class WowzaStreamingService {
         await this.initializeFromDatabase(userId);
       }
 
-      // Parar Stream Publisher via Wowza API
-      const response = await fetch(
-        `${this.baseUrl}/v2/servers/_defaultServer_/applications/${userLogin}/streamfiles/${smilFileName}/actions/disconnect`,
-        {
-          method: 'PUT',
-          headers: {
-            'Authorization': `Basic ${Buffer.from(`${this.username}:${this.password}`).toString('base64')}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: 10000
-        }
+      // Buscar serverId
+      const [serverRows] = await db.execute(
+        `SELECT codigo FROM wowza_servers WHERE status = 'ativo' LIMIT 1`
       );
 
-      if (response.ok) {
+      const serverId = serverRows.length > 0 ? serverRows[0].codigo : 1;
+
+      // Parar Stream Publisher via JMX
+      const SSHManager = require('./SSHManager');
+      const jmxCommand = '/usr/bin/java -cp /usr/local/WowzaMediaServer JMXCommandLine -jmx service:jmx:rmi://localhost:8084/jndi/rmi://localhost:8085/jmxrmi -user admin -pass admin';
+
+      const disconnectCommand = `${jmxCommand} disconnectStreamFile ${userLogin} ${smilFileName}`;
+      const result = await SSHManager.executeCommand(serverId, disconnectCommand);
+
+      if (result.stdout && !result.stdout.includes('ERROR')) {
         console.log(`✅ Streaming SMIL parado com sucesso para ${userLogin}`);
         return {
           success: true,
           message: 'Streaming parado com sucesso'
         };
       } else {
-        const errorText = await response.text();
-        console.error(`❌ Erro ao parar streaming SMIL: ${errorText}`);
+        console.error(`❌ Erro ao parar streaming SMIL:`, result.stdout || result.stderr);
         return {
           success: false,
-          error: errorText
+          error: result.stdout || result.stderr
         };
       }
     } catch (error) {

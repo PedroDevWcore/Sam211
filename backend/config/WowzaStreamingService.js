@@ -149,25 +149,40 @@ class WowzaStreamingService {
       const SSHManager = require('./SSHManager');
       const jmxCommand = '/usr/bin/java -cp /usr/local/WowzaMediaServer JMXCommandLine -jmx service:jmx:rmi://localhost:8084/jndi/rmi://localhost:8085/jmxrmi -user admin -pass admin';
 
-      console.log(`📁 Criando aplicação ${userLogin} via JMX...`);
+      console.log(`📁 Configurando aplicação ${userLogin} via JMX...`);
 
-      // Criar estrutura de diretórios primeiro
-      const createDirCommand = `mkdir -p /usr/local/WowzaStreamingEngine/conf/${userLogin} && echo "OK"`;
-      await SSHManager.executeCommand(serverId, createDirCommand);
+      // Verificar se diretório já existe
+      const checkDirCommand = `test -d /usr/local/WowzaStreamingEngine/conf/${userLogin} && echo "EXISTS" || echo "NOT_EXISTS"`;
+      const dirCheckResult = await SSHManager.executeCommand(serverId, checkDirCommand);
 
-      // Copiar template de aplicação
-      const copyTemplateCommand = `cp -r /usr/local/WowzaStreamingEngine/conf/_defaultServer_/_defaultVHost_/live/Application.xml /usr/local/WowzaStreamingEngine/conf/${userLogin}/Application.xml && echo "OK"`;
-      await SSHManager.executeCommand(serverId, copyTemplateCommand);
+      if (!dirCheckResult.stdout.includes('EXISTS')) {
+        // Criar estrutura de diretórios
+        const createDirCommand = `mkdir -p /usr/local/WowzaStreamingEngine/conf/${userLogin} && echo "OK"`;
+        await SSHManager.executeCommand(serverId, createDirCommand);
+
+        // Copiar template de aplicação do diretório correto
+        const copyTemplateCommand = `cp /usr/local/WowzaStreamingEngine/conf/live/Application.xml /usr/local/WowzaStreamingEngine/conf/${userLogin}/Application.xml && echo "OK"`;
+        await SSHManager.executeCommand(serverId, copyTemplateCommand);
+
+        // Copiar PushPublishMap.txt se necessário
+        const copyMapCommand = `cp /usr/local/WowzaStreamingEngine/conf/live/PushPublishMap.txt /usr/local/WowzaStreamingEngine/conf/${userLogin}/PushPublishMap.txt 2>/dev/null || touch /usr/local/WowzaStreamingEngine/conf/${userLogin}/PushPublishMap.txt`;
+        await SSHManager.executeCommand(serverId, copyMapCommand);
+
+        console.log(`📋 Estrutura de arquivos criada para ${userLogin}`);
+      } else {
+        console.log(`📋 Diretório ${userLogin} já existe, usando configuração existente`);
+      }
 
       // Iniciar aplicação via JMX
       const startCommand = `${jmxCommand} startAppInstance ${userLogin}`;
       const result = await SSHManager.executeCommand(serverId, startCommand);
 
-      if (result.stdout && !result.stdout.includes('ERROR')) {
-        console.log(`✅ Aplicação ${userLogin} criada e iniciada via JMX`);
+      // Verificar se iniciou com sucesso (pode já estar rodando)
+      if (result.stdout && (result.stdout.includes('success') || result.stdout.includes('already') || !result.stdout.includes('ERROR'))) {
+        console.log(`✅ Aplicação ${userLogin} está rodando via JMX`);
         return true;
       } else {
-        console.error(`❌ Erro ao criar aplicação ${userLogin}:`, result.stdout || result.stderr);
+        console.error(`❌ Erro ao iniciar aplicação ${userLogin}:`, result.stdout || result.stderr);
         return false;
       }
     } catch (error) {
